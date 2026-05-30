@@ -669,6 +669,16 @@ public final class Settings {
     public final Setting<Boolean> backfill = new Setting<>(false);
 
     /**
+     * While building (tunneling), collect nearby dropped items by adding them as pathing goals
+     */
+    public final Setting<Boolean> builderCollectItems = new Setting<>(true);
+
+    /**
+     * Maximum radius (blocks) to scan for dropped items while building/tunneling
+     */
+    public final Setting<Integer> builderCollectItemsScanRadius = new Setting<>(8);
+
+    /**
      * Shows popup message in the upper right corner, similarly to when you make an advancement
      */
     public final Setting<Boolean> logAsToast = new Setting<>(false);
