@@ -74,6 +74,10 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.item.ItemEntity;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.util.*;
@@ -104,6 +108,10 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
     private int numRepeats;
     private List<BlockState> approxPlaceable;
     public int stopAtHeight = 0;
+
+    // Item pickup for tunnel/clear-area
+    private Set<BlockPos> itemPickupPositions = new HashSet<>();
+    private int itemScanTicks = 0;
 
     public BuilderProcess(Baritone baritone) {
         super(baritone);
@@ -520,6 +528,15 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
                 layer++;
                 return onTick(calcFailed, isSafeToCancel, recursions + 1);
             }
+            // Collect any remaining dropped items before finishing
+            scanForItems();
+            if (!itemPickupPositions.isEmpty()) {
+                return new PathingCommandContext(
+                    itemPickupGoal(),
+                    PathingCommandType.REVALIDATE_GOAL_AND_PATH,
+                    bcc
+                );
+            }
             Vec3i repeat = Baritone.settings().buildRepeat.value;
             int max = Baritone.settings().buildRepeatCount.value;
             numRepeats++;
@@ -608,6 +625,15 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         if (goal == null) {
             goal = assemble(bcc, approxPlaceable, true); // we're far away, so assume that we have our whole inventory to recalculate placeable properly
             if (goal == null) {
+                // Try collecting items before giving up and pausing
+                scanForItems();
+                if (!itemPickupPositions.isEmpty()) {
+                    return new PathingCommandContext(
+                        itemPickupGoal(),
+                        PathingCommandType.REVALIDATE_GOAL_AND_PATH,
+                        bcc
+                    );
+                }
                 if (Baritone.settings().skipFailedLayers.value && Baritone.settings().buildInLayers.value && layer * Baritone.settings().layerHeight.value < realSchematic.heightY()) {
                     logDirect("Skipping layer that I cannot construct! Layer #" + layer);
                     layer++;
@@ -617,6 +643,17 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
                 paused = true;
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
+        }
+        // Mix in item pickup goals so the bot collects drops along the way
+        scanForItems();
+        if (!itemPickupPositions.isEmpty()) {
+            Goal[] itemGoals = itemPickupPositions.stream()
+                .map(GoalBlock::new)
+                .toArray(Goal[]::new);
+            Goal[] combined = new Goal[itemGoals.length + 1];
+            combined[0] = goal;
+            System.arraycopy(itemGoals, 0, combined, 1, itemGoals.length);
+            goal = new GoalComposite(combined);
         }
         return new PathingCommandContext(goal, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, bcc);
     }
@@ -982,6 +1019,46 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         }
     }
 
+    /**
+     * Scan for nearby dropped items and add their positions as pickup goals.
+     * Only rescans every 20 ticks (≈1 second) to avoid excessive entity iteration.
+     */
+    private void scanForItems() {
+        if (!Baritone.settings().builderCollectItems.value) {
+            if (!itemPickupPositions.isEmpty()) {
+                itemPickupPositions.clear();
+            }
+            return;
+        }
+        // Rescan every 20 ticks
+        if (itemScanTicks++ % 20 != 0) {
+            return;
+        }
+        Set<BlockPos> newItems = new HashSet<>();
+        int radius = Baritone.settings().builderCollectItemsScanRadius.value;
+        BlockPos playerPos = ctx.playerFeet();
+        for (Entity entity : ((ClientLevel) ctx.world()).entitiesForRendering()) {
+            if (entity instanceof ItemEntity) {
+                BlockPos itemPos = entity.blockPosition();
+                if (playerPos.distSqr(itemPos) <= radius * radius) {
+                    newItems.add(itemPos);
+                }
+            }
+        }
+        itemPickupPositions = newItems;
+    }
+
+    /**
+     * Build a GoalComposite from all current item pickup positions
+     */
+    private Goal itemPickupGoal() {
+        return new GoalComposite(
+            itemPickupPositions.stream()
+                .map(GoalBlock::new)
+                .toArray(Goal[]::new)
+        );
+    }
+
     @Override
     public void onLostControl() {
         incorrectPositions = null;
@@ -992,6 +1069,8 @@ public final class BuilderProcess extends BaritoneProcessHelper implements IBuil
         numRepeats = 0;
         paused = false;
         observedCompleted = null;
+        itemPickupPositions.clear();
+        itemScanTicks = 0;
     }
 
     @Override
