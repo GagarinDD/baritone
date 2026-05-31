@@ -94,6 +94,15 @@ allprojects {
         }
     }
 
+    unimined.minecraft(sourceSets.api, false) {
+        version rootProject.minecraft_version
+
+        mappings {
+            intermediary()
+            mojmap()
+        }
+    }
+
     tasks.withType(JavaCompile).configureEach {
         it.options.encoding = "UTF-8"
 

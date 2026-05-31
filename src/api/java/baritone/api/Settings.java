@@ -679,6 +679,16 @@ public final class Settings {
     public final Setting<Integer> builderCollectItemsScanRadius = new Setting<>(8);
 
     /**
+     * Minimum free inventory slots before pausing quarry (0 = disabled)
+     */
+    public final Setting<Integer> quarryMinFreeSlots = new Setting<>(3);
+
+    /**
+     * Minimum pickaxe durability required to continue quarry (< 0 = disabled)
+     */
+    public final Setting<Integer> quarryMinPickaxeDurability = new Setting<>(5);
+
+    /**
      * Shows popup message in the upper right corner, similarly to when you make an advancement
      */
     public final Setting<Boolean> logAsToast = new Setting<>(false);
