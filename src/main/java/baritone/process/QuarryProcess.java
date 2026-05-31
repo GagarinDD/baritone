@@ -189,8 +189,9 @@ public final class QuarryProcess extends BaritoneProcessHelper {
 
         // Check if we can break it right now
         if (ctx.playerFeet().distSqr(target) < 25 && isSafeToCancel) {
-            Optional<Rotation> rot = RotationUtils.reachable(ctx, target);
-            if (rot.isPresent() && MovementHelper.switchToBestToolFor(ctx, state)) {
+            Optional<Rotation> rot = RotationUtils.reachable(ctx, target, ctx.playerController().getBlockReachDistance());
+            if (rot.isPresent()) {
+                MovementHelper.switchToBestToolFor(ctx, state);
                 baritone.getLookBehavior().updateTarget(rot.get(), true);
                 if (ctx.isLookingAt(target) || ctx.playerRotations().isReallyCloseTo(rot.get())) {
                     baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
