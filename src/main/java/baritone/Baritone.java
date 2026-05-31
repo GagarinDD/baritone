@@ -80,7 +80,7 @@ public class Baritone implements IBaritone {
     private final FarmProcess farmProcess;
     private final InventoryPauserProcess inventoryPauserProcess;
     private final IElytraProcess elytraProcess;
-    private final QuarryProcess quarryProcess;
+    private final IQuarryProcess quarryProcess;
 
     private final PathingControlManager pathingControlManager;
     private final SelectionManager selectionManager;
@@ -213,7 +213,7 @@ public class Baritone implements IBaritone {
     }
 
     @Override
-    public QuarryProcess getQuarryProcess() {
+    public IQuarryProcess getQuarryProcess() {
         return this.quarryProcess;
     }
 

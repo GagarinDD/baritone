@@ -19,6 +19,7 @@ package baritone.process;
 
 import baritone.Baritone;
 import baritone.api.pathing.goals.GoalBlock;
+import baritone.api.process.IQuarryProcess;
 import baritone.api.process.PathingCommand;
 import baritone.api.process.PathingCommandType;
 import baritone.api.utils.*;
@@ -43,7 +44,7 @@ import java.util.*;
  *
  * @author GagarinDD
  */
-public final class QuarryProcess extends BaritoneProcessHelper {
+public final class QuarryProcess extends BaritoneProcessHelper implements IQuarryProcess {
 
     // ============== State ==============
 
@@ -77,6 +78,7 @@ public final class QuarryProcess extends BaritoneProcessHelper {
 
     // ============== Public API ==============
 
+    @Override
     public void quarry(int height, int width, BlockOptionalMetaLookup filter) {
         this.mineHeight = height;
         this.mineWidth = width;
@@ -154,7 +156,7 @@ public final class QuarryProcess extends BaritoneProcessHelper {
             detectBounds();
             if (corner1 == null || corner2 == null) {
                 logDirect("[Quarry] Could not detect bounds — is there bedrock around?");
-                cancel();
+                stopQuarry();
                 return null;
             }
             logDirect(String.format("[Quarry] Bounds: %s → %s, %d×%d",
@@ -177,7 +179,7 @@ public final class QuarryProcess extends BaritoneProcessHelper {
                     "[Quarry] ✅ Finished! %d layers, %d perimeters completed",
                     layersDone, layersDone
                 ), false);
-                cancel();
+                stopQuarry();
                 return null;
             }
         }
@@ -334,7 +336,7 @@ public final class QuarryProcess extends BaritoneProcessHelper {
 
             if (corner1.getX() >= corner2.getX() || corner1.getZ() >= corner2.getZ()) {
                 logDirect("[Quarry] Area exhausted — done!");
-                cancel();
+                stopQuarry();
                 return;
             }
 
@@ -371,7 +373,7 @@ public final class QuarryProcess extends BaritoneProcessHelper {
         return filter.has(state);
     }
 
-    private void cancel() {
+    private void stopQuarry() {
         filter = null;
         corner1 = null;
         corner2 = null;
@@ -382,7 +384,7 @@ public final class QuarryProcess extends BaritoneProcessHelper {
 
     @Override
     public void onLostControl() {
-        cancel();
+        stopQuarry();
     }
 
     @Override

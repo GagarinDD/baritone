@@ -27,7 +27,6 @@ import baritone.api.process.*;
 import baritone.api.selection.ISelectionManager;
 import baritone.api.utils.IInputOverrideHandler;
 import baritone.api.utils.IPlayerContext;
-import baritone.process.QuarryProcess;
 
 /**
  * @author Brady
@@ -68,7 +67,7 @@ public interface IBaritone {
     /**
      * @return The quarry process instance
      */
-    QuarryProcess getQuarryProcess();
+    IQuarryProcess getQuarryProcess();
 
     /**
      * @return The {@link IExploreProcess} instance
