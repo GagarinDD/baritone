@@ -18,65 +18,45 @@
 package baritone.process;
 
 import baritone.Baritone;
-import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.process.IQuarryProcess;
 import baritone.api.process.PathingCommand;
 import baritone.api.process.PathingCommandType;
-import baritone.api.utils.*;
-import baritone.api.utils.input.Input;
-import baritone.pathing.movement.MovementHelper;
+import baritone.api.schematic.FillSchematic;
+import baritone.api.schematic.MaskSchematic;
+import baritone.api.utils.BlockOptionalMetaLookup;
+import baritone.api.utils.BlockOptionalMeta;
 import baritone.utils.BaritoneProcessHelper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.level.block.AirBlock;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
-import java.util.*;
-
 /**
- * Quarry process — spirals inward mining only specified blocks.
- * 
- * The process mines a rectangular tunnel strip along the current wall,
- * turns 90° when hitting non-mineable blocks, and after 4 turns (full
- * perimeter) shrinks inward by the tunnel width.
+ * Quarry process — chains BuilderProcess strips in a shrinking spiral.
  *
- * @author GagarinDD
+ * Uses the battle-tested BuilderProcess (same as #tunnel) for each strip.
+ * Only targets blocks matching the filter — non-filtered blocks are treated
+ * as boundaries.
  */
 public final class QuarryProcess extends BaritoneProcessHelper implements IQuarryProcess {
 
-    // ============== State ==============
-
-    /** Blocks to mine (from command args) */
     private BlockOptionalMetaLookup filter;
-    /** Height of the tunnel */
     private int mineHeight;
-    /** Width of the tunnel (also the step-in size after each full perimeter) */
     private int mineWidth;
-    /** Current direction the quarry is facing */
     private Direction facing;
-    /** Which wall we're mining (0-3 per full perimeter) */
     private int wallIndex;
-    /** Current bounds of the quarry rectangle */
     private BlockPos corner1;
     private BlockPos corner2;
-    /** The starting corner — where player stood when quarry was launched */
-    private BlockPos homeCorner;
-    /** Whether the process is paused */
     private boolean paused;
-    /** Current target block to break */
-    private BlockPos currentTarget;
-    /** Number of completed perimeters (full 4-wall loops) */
     private int layersDone;
-
-    // ============== Constructor ==============
+    private boolean stripActive;
 
     public QuarryProcess(Baritone baritone) {
         super(baritone);
     }
-
-    // ============== Public API ==============
 
     @Override
     public void quarry(int height, int width, BlockOptionalMetaLookup filter) {
@@ -87,12 +67,11 @@ public final class QuarryProcess extends BaritoneProcessHelper implements IQuarr
         this.wallIndex = 0;
         this.layersDone = 0;
         this.paused = false;
-        this.homeCorner = ctx.playerFeet();
-        this.currentTarget = null;
+        this.stripActive = false;
 
         logDirect(String.format(
-            "[Quarry] Starting %d×%d tunnel, facing %s, filter: %s",
-            height, width, facing, filter.toString()
+            "[Quarry] %dH×%dW, facing %s. Stand in corner, face along wall.",
+            height, width, facing
         ));
     }
 
@@ -103,10 +82,8 @@ public final class QuarryProcess extends BaritoneProcessHelper implements IQuarr
 
     @Override
     public boolean isTemporary() {
-        return false;
+        return true;
     }
-
-    // ============== Tick ==============
 
     @Override
     public PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel) {
@@ -115,240 +92,227 @@ public final class QuarryProcess extends BaritoneProcessHelper implements IQuarr
         }
 
         // --- STOP CONDITIONS ---
-
-        // 1. Inventory check
         int minFree = Baritone.settings().quarryMinFreeSlots.value;
         if (minFree > 0) {
             long freeSlots = ctx.player().getInventory().items.stream()
-                    .filter(ItemStack::isEmpty)
-                    .count();
+                    .filter(ItemStack::isEmpty).count();
             if (freeSlots <= minFree) {
-                logNotification(
-                    String.format("[Quarry] ⛔ Inventory full! Free slots: %d (threshold: %d). Clear inventory and run #resume",
-                        freeSlots, minFree),
-                    true
-                );
+                logNotification(String.format(
+                    "[Quarry] Inventory full! Free=%d, need > %d. #resume after clearing.",
+                    freeSlots, minFree), true);
                 paused = true;
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
         }
 
-        // 2. Pickaxe check
         int minDur = Baritone.settings().quarryMinPickaxeDurability.value;
         if (minDur >= 0) {
             boolean hasPickaxe = ctx.player().getInventory().items.stream()
                     .filter(s -> !s.isEmpty() && s.getItem() instanceof PickaxeItem)
                     .anyMatch(s -> s.getMaxDamage() - s.getDamageValue() >= minDur);
             if (!hasPickaxe) {
-                logNotification(
-                    String.format("[Quarry] ⛔ No pickaxe with durability >= %d! Repair/craft and run #resume", minDur),
-                    true
-                );
+                logNotification(String.format(
+                    "[Quarry] No pickaxe dur >= %d! #resume after repair.", minDur), true);
                 paused = true;
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
         }
 
-        // --- Detect boundaries ---
-
-        // If bounds not set, find them by scanning forward in current direction
+        // --- Detect bounds ---
         if (corner1 == null || corner2 == null) {
             detectBounds();
             if (corner1 == null || corner2 == null) {
-                logDirect("[Quarry] Could not detect bounds — is there bedrock around?");
+                logDirect("[Quarry] Could not detect bounds — no mineable blocks ahead?");
                 stopQuarry();
                 return null;
             }
-            logDirect(String.format("[Quarry] Bounds: %s → %s, %d×%d",
-                corner1, corner2,
-                Math.abs(corner2.getX() - corner1.getX()) + 1,
-                Math.abs(corner2.getZ() - corner1.getZ()) + 1
-            ));
+            logDirect(String.format("[Quarry] Bounds: %s → %s", corner1, corner2));
         }
 
-        // --- Find next block to mine ---
-
-        currentTarget = findNextBlock();
-        if (currentTarget == null) {
-            // No mineable blocks in current strip — advance
+        // --- If BuilderProcess active, defer ---
+        if (stripActive) {
+            if (baritone.getBuilderProcess().isActive()) {
+                return new PathingCommand(null, PathingCommandType.DEFER);
+            }
+            // Builder done → advance
+            stripActive = false;
             advanceStrip();
-            currentTarget = findNextBlock();
-            if (currentTarget == null) {
-                // Truly nothing left to mine
-                logNotification(String.format(
-                    "[Quarry] ✅ Finished! %d layers, %d perimeters completed",
-                    layersDone, layersDone
-                ), false);
+            if (!isActive()) return null;
+        }
+
+        // --- Check exit condition ---
+        if (corner1.getX() >= corner2.getX() || corner1.getZ() >= corner2.getZ()) {
+            logNotification(String.format(
+                "[Quarry] Done! %d layers.", layersDone), false);
+            stopQuarry();
+            return null;
+        }
+
+        // --- Start next strip ---
+        BlockPos origin = ctx.playerFeet();
+        int stripLen = stripLength(origin);
+
+        if (stripLen < 2) {
+            // Not enough space — advance immediately
+            advanceStrip();
+            if (!isActive()) return null;
+            if (corner1.getX() >= corner2.getX() || corner1.getZ() >= corner2.getZ()) {
+                logNotification(String.format("[Quarry] Done! %d layers.", layersDone), false);
                 stopQuarry();
                 return null;
             }
+            origin = ctx.playerFeet();
+            stripLen = stripLength(origin);
         }
 
-        // --- Path to target and break ---
-
-        BlockPos target = currentTarget;
-        BlockState state = ctx.world().getBlockState(target);
-
-        // Check if we can break it right now
-        if (ctx.playerFeet().distSqr(target) < 25 && isSafeToCancel) {
-            Optional<Rotation> rot = RotationUtils.reachable(ctx, target, ctx.playerController().getBlockReachDistance());
-            if (rot.isPresent()) {
-                MovementHelper.switchToBestToolFor(ctx, state);
-                baritone.getLookBehavior().updateTarget(rot.get(), true);
-                if (ctx.isLookingAt(target) || ctx.playerRotations().isReallyCloseTo(rot.get())) {
-                    baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
-                }
-                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+        // Schematic: mineWidth wide, mineHeight tall, stripLen long, filled with AIR
+        // Mask: only break blocks matching the filter
+        final BlockOptionalMetaLookup f = filter;
+        final int len = stripLen;
+        MaskSchematic filteredAir = new MaskSchematic(
+            new FillSchematic(mineWidth, mineHeight, len, Blocks.AIR.defaultBlockState())
+        ) {
+            @Override
+            public boolean partOfMask(int x, int y, int z,
+                    net.minecraft.world.level.block.state.BlockState current) {
+                return f.has(current);
             }
-        }
+        };
 
-        // Otherwise path to it
-        return new PathingCommand(new GoalBlock(target), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        baritone.getBuilderProcess().build("quarry-strip", filteredAir, origin);
+        stripActive = true;
+
+        logDirect(String.format("[Quarry] Strip %d (%s), len=%d", wallIndex + 1, facing, len));
+        return new PathingCommand(null, PathingCommandType.DEFER);
     }
 
-    // ============== Bound Detection ==============
+    // ============================================================
+    //  BOUNDS
+    // ============================================================
 
-    /**
-     * Scans forward to find the far boundary (bedrock or non-mineable block) in current direction.
-     * Sets corner1 and corner2 based on the detected rectangle.
-     */
     private void detectBounds() {
         BlockPos feet = ctx.playerFeet();
-        int maxScan = 200; // don't scan forever
+        int maxScan = 200;
 
-        // Scan forward until hitting non-mineable
+        // Scan forward
         int farDist = 0;
-        for (int i = 1; i <= maxScan; i++) {
+        for (int i = 0; i < maxScan; i++) {
             BlockPos check = feet.relative(facing, i);
-            if (!isMineable(check)) {
-                farDist = i - 1;
-                break;
-            }
+            if (!isPassable(check)) break;
+            farDist = i;
         }
-        if (farDist < mineWidth) {
-            // Too close to boundary
+
+        Direction left = rotateLeft(facing);
+        Direction right = rotateLeft(rotateLeft(rotateLeft(facing)));
+
+        int leftDist = 0;
+        for (int i = 0; i < maxScan; i++) {
+            BlockPos check = feet.relative(left, i);
+            if (!isPassable(check)) break;
+            leftDist = i;
+        }
+
+        int rightDist = 0;
+        for (int i = 0; i < maxScan; i++) {
+            BlockPos check = feet.relative(right, i);
+            if (!isPassable(check)) break;
+            rightDist = i;
+        }
+
+        if (farDist < mineWidth || leftDist < mineWidth || rightDist < mineWidth) {
+            logDirect(String.format("[Quarry] Area too small: f=%d l=%d r=%d", farDist, leftDist, rightDist));
             return;
         }
 
-        // Try to find left and right boundaries by scanning perpendicular
-        Direction left = rotateLeft(facing);
-        int leftDist = 0;
-        for (int i = 1; i <= maxScan; i++) {
-            BlockPos check = feet.relative(left, i);
-            boolean anyMineable = false;
-            for (int dy = 0; dy < mineHeight; dy++) {
-                if (isMineable(check.above(dy))) {
-                    anyMineable = true;
-                    break;
-                }
-            }
-            if (!anyMineable) {
-                leftDist = i - 1;
-                break;
-            }
-        }
+        corner1 = new BlockPos(
+            feet.getX() - Math.max(0, left.getStepX() * leftDist),
+            feet.getY(),
+            feet.getZ() - Math.max(0, left.getStepZ() * leftDist)
+        );
+        corner2 = new BlockPos(
+            feet.getX() + Math.max(0, facing.getStepX() * farDist) + Math.max(0, right.getStepX() * rightDist),
+            feet.getY() + mineHeight - 1,
+            feet.getZ() + Math.max(0, facing.getStepZ() * farDist) + Math.max(0, right.getStepZ() * rightDist)
+        );
 
-        Direction right = rotateLeft(rotateLeft(rotateLeft(left))); // opposite of left = right
-        int rightDist = 0;
-        for (int i = 1; i <= maxScan; i++) {
-            BlockPos check = feet.relative(right, i);
-            boolean anyMineable = false;
-            for (int dy = 0; dy < mineHeight; dy++) {
-                if (isMineable(check.above(dy))) {
-                    anyMineable = true;
-                    break;
-                }
-            }
-            if (!anyMineable) {
-                rightDist = i - 1;
-                break;
-            }
-        }
-
-        // Set corners
-        BlockPos c1 = feet.relative(left, leftDist).relative(facing.getOpposite(), 0);
-        BlockPos c2 = feet.relative(right, rightDist).relative(facing, farDist).above(mineHeight - 1);
-
-        corner1 = new BlockPos(Math.min(c1.getX(), c2.getX()), c1.getY(), Math.min(c1.getZ(), c2.getZ()));
-        corner2 = new BlockPos(Math.max(c1.getX(), c2.getX()), c2.getY(), Math.max(c1.getZ(), c2.getZ()));
+        // Normalize: corner1 = min, corner2 = max
+        BlockPos c1 = new BlockPos(
+            Math.min(corner1.getX(), corner2.getX()),
+            corner1.getY(),
+            Math.min(corner1.getZ(), corner2.getZ())
+        );
+        BlockPos c2 = new BlockPos(
+            Math.max(corner1.getX(), corner2.getX()),
+            corner2.getY(),
+            Math.max(corner1.getZ(), corner2.getZ())
+        );
+        corner1 = c1;
+        corner2 = c2;
     }
 
-    // ============== Block Finding ==============
-
-    /**
-     * Find the next mineable block in the current tunnel strip along the current wall.
-     */
-    private BlockPos findNextBlock() {
-        if (corner1 == null || corner2 == null) return null;
-
-        BlockPos feet = ctx.playerFeet();
-        int scanRadius = 10;
-
-        // Search in current strip ahead
-        for (int dist = 0; dist <= Math.max(Math.abs(corner2.getX() - corner1.getX()), Math.abs(corner2.getZ() - corner1.getZ())) + 10; dist++) {
-            BlockPos check = feet.relative(facing, dist);
-
-            // Check if this position is still within bounds
-            if (!isWithinBounds(check)) {
-                continue;
-            }
-
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dy = 0; dy < mineHeight; dy++) {
-                    for (int dz = -2; dz <= 2; dz++) {
-                        BlockPos pos = check.offset(dx, dy, dz);
-                        if (!isWithinBounds(pos)) continue;
-                        if (ctx.playerFeet().distSqr(pos) > scanRadius * scanRadius) continue;
-
-                        BlockState state = ctx.world().getBlockState(pos);
-                        if (state.getBlock() instanceof AirBlock) continue;
-                        if (filter.has(state) && !MovementHelper.avoidBreaking(baritone.bsi, pos.getX(), pos.getY(), pos.getZ(), state)) {
-                            return pos;
-                        }
-                    }
-                }
-            }
-        }
-        return null;
+    private boolean isPassable(BlockPos pos) {
+        BlockState state = ctx.world().getBlockState(pos);
+        if (state.getBlock() instanceof AirBlock) return true;
+        return filter.has(state);
     }
 
-    // ============== Strip Advancement ==============
+    // ============================================================
+    //  STRIP
+    // ============================================================
 
     /**
-     * Advance to the next wall strip. Turn 90° left, or after 4 walls: shrink inward.
+     * How far the strip should extend from origin in the current facing direction,
+     * before hitting the area boundary.
      */
+    private int stripLength(BlockPos origin) {
+        int dist = 0;
+        // Scan until out of bounds
+        while (true) {
+            BlockPos check = origin.relative(facing, dist);
+            if (!isWithinBounds(check)) break;
+            dist++;
+            if (dist > 300) break;
+        }
+        return dist;
+    }
+
+    private boolean isWithinBounds(BlockPos pos) {
+        if (corner1 == null || corner2 == null) return true;
+        return pos.getX() >= corner1.getX() && pos.getX() <= corner2.getX()
+            && pos.getZ() >= corner1.getZ() && pos.getZ() <= corner2.getZ();
+    }
+
+    // ============================================================
+    //  ADVANCEMENT
+    // ============================================================
+
     private void advanceStrip() {
         wallIndex++;
         if (wallIndex >= 4) {
-            // Completed full perimeter → shrink inward
             wallIndex = 0;
             layersDone++;
-
-            Direction rightDir = rotateLeft(rotateLeft(rotateLeft(facing)));
-            BlockPos shrink = new BlockPos(
-                corner1.getX() + mineWidth * Math.abs(facing.getStepX()),
+            // Shrink inward: move both corners toward center by mineWidth
+            Direction pushDir = rotateLeft(rotateLeft(facing));
+            corner1 = new BlockPos(
+                corner1.getX() + mineWidth * Math.max(0, pushDir.getStepX()),
                 corner1.getY(),
-                corner1.getZ() + mineWidth * Math.abs(facing.getStepZ())
+                corner1.getZ() + mineWidth * Math.max(0, pushDir.getStepZ())
             );
-
-            corner1 = shrink;
-            corner2 = corner2.relative(facing.getOpposite(), mineWidth).relative(rightDir.getOpposite(), mineWidth);
-
-            if (corner1.getX() >= corner2.getX() || corner1.getZ() >= corner2.getZ()) {
-                logDirect("[Quarry] Area exhausted — done!");
-                stopQuarry();
-                return;
-            }
-
-            logDirect(String.format("[Quarry] Layer %d complete. Shrunk bounds: %s → %s", layersDone, corner1, corner2));
+            corner2 = new BlockPos(
+                corner2.getX() - mineWidth * Math.max(0, pushDir.getOpposite().getStepX()),
+                corner2.getY(),
+                corner2.getZ() - mineWidth * Math.max(0, pushDir.getOpposite().getStepZ())
+            );
+            logDirect(String.format("[Quarry] Layer %d done → shrinking inward", layersDone));
         } else {
-            // Turn 90° left
             facing = rotateLeft(facing);
-            logDirect(String.format("[Quarry] Turning left to face %s (wall %d/4)", facing, wallIndex + 1));
+            logDirect(String.format("[Quarry] Turn left → %s (wall %d/4)", facing, wallIndex + 1));
         }
     }
 
-    // ============== Helpers ==============
+    // ============================================================
+    //  HELPERS
+    // ============================================================
 
     private Direction rotateLeft(Direction dir) {
         switch (dir) {
@@ -360,25 +324,12 @@ public final class QuarryProcess extends BaritoneProcessHelper implements IQuarr
         }
     }
 
-    private boolean isWithinBounds(BlockPos pos) {
-        if (corner1 == null || corner2 == null) return false;
-        return pos.getX() >= corner1.getX() && pos.getX() <= corner2.getX()
-            && pos.getY() >= corner1.getY() && pos.getY() <= corner2.getY()
-            && pos.getZ() >= corner1.getZ() && pos.getZ() <= corner2.getZ();
-    }
-
-    private boolean isMineable(BlockPos pos) {
-        BlockState state = ctx.world().getBlockState(pos);
-        if (state.getBlock() instanceof AirBlock) return true; // already mined
-        return filter.has(state);
-    }
-
     private void stopQuarry() {
         filter = null;
         corner1 = null;
         corner2 = null;
-        currentTarget = null;
         paused = false;
+        stripActive = false;
         baritone.getInputOverrideHandler().clearAllKeys();
     }
 
@@ -389,11 +340,11 @@ public final class QuarryProcess extends BaritoneProcessHelper implements IQuarr
 
     @Override
     public String displayName0() {
-        return paused ? "Quarry Paused" : "Quarry " + filter;
+        return paused ? "Quarry Paused" : "Quarry";
     }
 
     @Override
     public double priority() {
-        return 3; // Lower than MineProcess(4) so it doesn't fight
+        return 3;
     }
 }
