@@ -38,32 +38,48 @@ public class QuarryCommand extends Command {
 
     @Override
     public void execute(String label, IArgConsumer args) throws CommandException {
-        args.requireMin(3);
-        int height = Integer.parseInt(args.getArgs().get(0).getValue());
-        int width = Integer.parseInt(args.getArgs().get(1).getValue());
-        args.get(); // consume height
-        args.get(); // consume width
+        // Parse as: quarry <height> <width> <blocks...>
+        // Blocks can be comma-separated or space-separated
+        int height = args.getAsOrDefault(Integer.class, 0);
+        int width = args.getAsOrDefault(Integer.class, 0);
 
         if (width < 1 || height < 2) {
-            logDirect("Width must be >= 1, height must be >= 2");
+            logDirect("Width must be >= 1, height must be >= 2. Usage: #quarry 3 3 cobblestone copper_ore ...");
             return;
         }
 
-        List<BlockOptionalMeta> boms = new ArrayList<>();
+        // Collect all remaining args and split by commas
+        List<String> rawBlocks = new ArrayList<>();
         while (args.hasAny()) {
-            boms.add(args.getDatatypeFor(ForBlockOptionalMeta.INSTANCE));
+            rawBlocks.add(args.getString());
         }
 
-        if (boms.isEmpty()) {
-            logDirect("Specify at least one block type to mine");
+        if (rawBlocks.isEmpty()) {
+            logDirect("Specify at least one block type to mine. Usage: #quarry 3 3 cobblestone copper_ore ...");
             return;
+        }
+
+        // Split comma-separated blocks (supports both "a,b,c" and "a b c")
+        List<BlockOptionalMeta> boms = new ArrayList<>();
+        for (String raw : rawBlocks) {
+            for (String part : raw.split(",")) {
+                String trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    try {
+                        boms.add(new BlockOptionalMeta(trimmed));
+                    } catch (IllegalArgumentException e) {
+                        logDirect("Unknown block: " + trimmed);
+                        return;
+                    }
+                }
+            }
         }
 
         BlockOptionalMetaLookup filter = new BlockOptionalMetaLookup(
             boms.toArray(new BlockOptionalMeta[0])
         );
         logDirect(String.format(
-            "Starting quarry %d×%d, blocks: %s. Stand in corner, face along a wall.",
+            "Starting quarry %d\u00d7%d, blocks: %s. Stand in corner, face along a wall.",
             height, width, boms.toString()
         ));
         baritone.getQuarryProcess().quarry(height, width, filter);
@@ -94,12 +110,14 @@ public class QuarryCommand extends Command {
             "> quarry <height> <width> <blocks...>",
             "",
             "Examples:",
-            "> quarry 3 3 cobblestone,stone,iron_ore,coal_ore",
+            "> quarry 3 3 cobblestone stone iron_ore coal_ore",
             "> quarry 2 2 deepslate,copper_ore,gold_ore",
+            "",
+            "Blocks can be space-separated or comma-separated.",
             "",
             "The bot will:",
             "  1. Mine straight until it hits non-mineable blocks",
-            "  2. Turn 90° left, mine next wall",
+            "  2. Turn 90Â° left, mine next wall",
             "  3. After 4 walls (full perimeter), step inward by <width> blocks",
             "  4. Repeat until area is exhausted",
             "",
